@@ -4825,4 +4825,318 @@
 !!!!!!!!
 
 
-  
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!!! Work of Jesper Byggmastar BEGINS here
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+   subroutine eam_density_initialise(this,args_str,error)
+      type(eam_density), intent(inout) :: this
+      character(len=*), intent(in) :: args_str
+      integer, optional, intent(out) :: error
+
+      type(Dictionary) :: params
+
+      INIT_ERROR(error)
+
+      call finalise(this)
+      call initialise(params)
+      call param_register(params, 'cutoff', '0.00', this%cutoff, help_string="Cutoff for eam_density-type descriptors")
+      call param_register(params, 'pair_function', 'FSgen', this%pair_function, help_string="Pair density function rho_ij.")
+      call param_register(params, 'order', '2', this%order, help_string="Order n of polynomial pair density function (FSgen): (-1)^n * (r-rcut)^n / rcut**n")
+      call param_register(params, 'rmin', '0.00', this%rmin, help_string="Distance below which cutoff-like pair density functions are constant")
+      call param_register(params, 'prefactor', '1.00', this%prefactor, help_string="Optional prefactor of pair density function")
+      !call param_register(params, 'transition_width', '0.20', this%transition_width, help_string="Width of transition region from 1 to 0")
+      call param_register(params, 'Z', '0', this%Z, help_string="Atomic number of central atom", altkey="Z_center")
+
+      if (.not. param_read_line(params, args_str, ignore_unknown=.true.,task='eam_density_initialise args_str')) then
+         RAISE_ERROR("eam_density_initialise failed to parse args_str='"//trim(args_str)//"'", error)
+      endif
+      call finalise(params)
+
+      this%initialised = .true.
+
+   endsubroutine eam_density_initialise
+
+   subroutine eam_density_finalise(this,error)
+      type(eam_density), intent(inout) :: this
+      integer, optional, intent(out) :: error
+
+      INIT_ERROR(error)
+
+      if(.not. this%initialised) return
+      this%cutoff = 0.0_dp
+      this%pair_function = 'FSgen'
+      this%rmin = 0.0_dp
+      this%order = 2
+      !this%transition_width = 0.0_dp
+      this%Z = 0
+
+      this%initialised = .false.
+
+   endsubroutine eam_density_finalise 
+
+   subroutine eam_density_calc(this,at,descriptor_out,do_descriptor,do_grad_descriptor,args_str,error)
+      type(eam_density), intent(in) :: this
+      type(atoms), intent(in) :: at
+      type(descriptor_data), intent(out) :: descriptor_out
+      logical, intent(in), optional :: do_descriptor, do_grad_descriptor
+      character(len=*), intent(in), optional :: args_str 
+      integer, optional, intent(out) :: error
+
+      type(Dictionary) :: params
+      character(STRING_LENGTH) :: atom_mask_name
+      logical :: has_atom_mask_name
+      logical, dimension(:), pointer :: atom_mask_pointer
+
+      logical :: my_do_descriptor, my_do_grad_descriptor
+      integer :: d, i, j, n, i_n, l_n_neighbours, i_desc, n_descriptors, n_cross, n_index
+      integer, dimension(3) :: shift
+      real(dp) :: r_ij, rho_ij
+      real(dp), dimension(3) :: u_ij, drho_ij
+
+      INIT_ERROR(error)
+
+      call system_timer('eam_density_calc')
+
+      if(.not. this%initialised) then
+         RAISE_ERROR("eam_density_calc: descriptor object not initialised", error)
+      endif
+
+      my_do_descriptor = optional_default(.false., do_descriptor)
+      my_do_grad_descriptor = optional_default(.false., do_grad_descriptor)
+
+      if( .not. my_do_descriptor .and. .not. my_do_grad_descriptor ) return
+
+      atom_mask_pointer => null()
+      if(present(args_str)) then
+         call initialise(params)
+         
+         call param_register(params, 'atom_mask_name', 'NONE', atom_mask_name, has_value_target=has_atom_mask_name, &
+         help_string="Name of a logical property in the atoms object. For atoms where this property is true descriptors are " // &
+         "calculated.")
+
+         if (.not. param_read_line(params,args_str,ignore_unknown=.true.,task='eam_density_calc args_str')) then
+            RAISE_ERROR("eam_density_calc failed to parse args_str='"//trim(args_str)//"'", error)
+         endif
+         
+         call finalise(params)
+
+         if( has_atom_mask_name ) then
+            if (.not. assign_pointer(at, trim(atom_mask_name), atom_mask_pointer)) then
+               RAISE_ERROR("eam_density_calc did not find "//trim(atom_mask_name)//" property in the atoms object.", error)
+            endif
+         else
+            atom_mask_pointer => null()
+         endif
+
+      endif
+
+      call finalise(descriptor_out)
+
+      d = eam_density_dimensions(this,error)
+
+      if(associated(atom_mask_pointer)) then
+         call descriptor_sizes(this,at,n_descriptors,n_cross, &
+            mask=atom_mask_pointer,n_index=n_index,error=error)
+      else
+         call descriptor_sizes(this,at,n_descriptors,n_cross,n_index=n_index,error=error)
+      endif
+
+      allocate(descriptor_out%x(n_descriptors))
+      i_desc = 0
+      do i = 1, at%N
+         if( at%Z(i) /= this%Z .and. this%Z /=0 ) cycle
+         if(associated(atom_mask_pointer)) then
+            if(.not. atom_mask_pointer(i)) cycle
+         endif
+
+         i_desc = i_desc + 1
+         if(my_do_descriptor) then
+            allocate(descriptor_out%x(i_desc)%data(d))
+            descriptor_out%x(i_desc)%data = 0.0_dp
+            allocate(descriptor_out%x(i_desc)%ci(n_index))
+            descriptor_out%x(i_desc)%has_data = .false.
+
+            descriptor_out%x(i_desc)%covariance_cutoff = 1.0_dp
+         endif
+         if(my_do_grad_descriptor) then
+            l_n_neighbours = n_neighbours(at,i,max_dist=this%cutoff) 
+
+            allocate(descriptor_out%x(i_desc)%grad_data(d,3,0:l_n_neighbours)) 
+            allocate(descriptor_out%x(i_desc)%ii(0:l_n_neighbours)) 
+            allocate(descriptor_out%x(i_desc)%pos(3,0:l_n_neighbours)) 
+            allocate(descriptor_out%x(i_desc)%has_grad_data(0:l_n_neighbours)) 
+            descriptor_out%x(i_desc)%grad_data = 0.0_dp
+            descriptor_out%x(i_desc)%ii = 0
+            descriptor_out%x(i_desc)%pos = 0.0_dp
+            descriptor_out%x(i_desc)%has_grad_data = .false.
+
+            allocate(descriptor_out%x(i_desc)%grad_covariance_cutoff(3,0:l_n_neighbours)) 
+            descriptor_out%x(i_desc)%grad_covariance_cutoff = 0.0_dp
+         endif
+      enddo
+
+      i_desc = 0
+      do i = 1, at%N
+
+         if( at%Z(i) /= this%Z .and. this%Z /=0 ) cycle
+         if(associated(atom_mask_pointer)) then
+            if(.not. atom_mask_pointer(i)) cycle
+         endif
+         i_desc = i_desc + 1
+
+         if(my_do_descriptor) then
+            descriptor_out%x(i_desc)%ci(1) = i
+            descriptor_out%x(i_desc)%has_data = .true.
+         endif
+         if(my_do_grad_descriptor) then
+            descriptor_out%x(i_desc)%ii(0) = i
+            descriptor_out%x(i_desc)%pos(:,0) = at%pos(:,i) 
+            descriptor_out%x(i_desc)%has_grad_data(0) = .true.
+         endif
+
+         i_n = 0
+         do n = 1, n_neighbours(at,i) 
+            j = neighbour(at, i, n, distance = r_ij, cosines = u_ij, shift=shift) 
+
+            if( r_ij >= this%cutoff ) cycle
+            i_n = i_n + 1
+
+            if(my_do_descriptor) &
+               call eam_density_pair_function(this, r_ij, u_ij, this%pair_function, this%cutoff, this%rmin, &
+               this%order, this%prefactor, rho_ij, drho_ij, error)
+               descriptor_out%x(i_desc)%data(1) = descriptor_out%x(i_desc)%data(1) + rho_ij
+
+            if(my_do_grad_descriptor) then
+               !df_cut = dcoordination_function(r_ij,this%cutoff,this%transition_width) * u_ij
+
+               descriptor_out%x(i_desc)%grad_data(1,:,0) = descriptor_out%x(i_desc)%grad_data(1,:,0) - drho_ij
+
+               descriptor_out%x(i_desc)%ii(i_n) = j
+               descriptor_out%x(i_desc)%pos(:,i_n) = at%pos(:,j) + matmul(at%lattice,shift)
+               descriptor_out%x(i_desc)%has_grad_data(i_n) = .true.
+               descriptor_out%x(i_desc)%grad_data(1,:,i_n) = drho_ij
+            endif
+         enddo
+      enddo
+
+      call system_timer('eam_density_calc')
+
+   endsubroutine eam_density_calc
+
+   function eam_density_dimensions(this,error) result(i)
+      type(eam_density), intent(in) :: this
+      integer, optional, intent(out) :: error
+      integer :: i
+
+      INIT_ERROR(error)
+
+      if(.not. this%initialised) then
+         RAISE_ERROR("eam_density_dimensions: descriptor object not initialised", error)
+      endif
+
+      i = 1
+
+   endfunction eam_density_dimensions
+
+   function eam_density_cutoff(this,error)
+      type(eam_density), intent(in) :: this
+      integer, optional, intent(out) :: error
+      real(dp) :: eam_density_cutoff
+
+      INIT_ERROR(error)
+
+      if(.not. this%initialised) then
+         RAISE_ERROR("eam_density_cutoff: descriptor object not initialised", error)
+      endif
+
+      eam_density_cutoff = this%cutoff
+
+   endfunction eam_density_cutoff
+
+   subroutine eam_density_sizes(this,at,n_descriptors,n_cross,mask,n_index,error)
+      type(eam_density), intent(in) :: this
+      type(atoms), intent(in) :: at
+      integer, intent(out) :: n_descriptors, n_cross
+      logical, dimension(:), intent(in), optional :: mask
+      integer, intent(out), optional :: n_index
+      integer, optional, intent(out) :: error
+
+      integer :: i
+
+      INIT_ERROR(error)
+
+      if(.not. this%initialised) then
+         RAISE_ERROR("eam_density_sizes: descriptor object not initialised", error)
+      endif
+
+      n_descriptors = 0
+      n_cross = 0
+      do i = 1, at%N
+         if( at%Z(i) /= this%Z .and. this%Z /=0 ) cycle
+         if(present(mask)) then
+            if(.not. mask(i)) cycle
+         endif
+         n_descriptors = n_descriptors + 1
+         n_cross = n_cross + n_neighbours(at,i,max_dist=this%cutoff) + 1
+      enddo
+
+      if( present(n_index) ) n_index = 1
+
+   endsubroutine eam_density_sizes
+
+   subroutine eam_density_pair_function(this, r_ij, u_ij, pair_function, rcut, rmin, order, prefactor, rho_ij, drho_ij, error)
+      type(eam_density), intent(in) :: this
+      integer, intent(in) :: order
+      integer :: ii
+      real(dp), intent(in) :: r_ij, rcut, rmin, prefactor
+      character(STRING_LENGTH) :: pair_function
+      real(dp), intent(out) :: rho_ij
+      real(dp), dimension(3), intent(out) :: drho_ij
+      real(dp), dimension(3), intent(in) :: u_ij
+      real(dp) :: chi, help_var
+      real(dp), parameter :: PI = acos(-1.0_dp)
+      integer, optional, intent(out) :: error
+      INIT_ERROR(error)
+
+      if (pair_function == 'FSgen') then
+         rho_ij = (-1)**order * (r_ij - rcut)**order / rcut**order
+         drho_ij = (-1)**order * order * (r_ij - rcut)**(order - 1) / rcut**order * u_ij
+      else if (pair_function == 'polycutoff') then
+         if (r_ij > rcut) then
+            rho_ij = 0.0_dp
+            drho_ij = 0.0_dp
+         else if (r_ij < rmin) then
+            rho_ij = 1.0_dp
+            drho_ij = 0.0_dp
+         else
+            chi = (r_ij - rmin) / (rcut - rmin)
+            rho_ij = 1.0_dp - chi**3 * (6.0_dp * chi**2 - 15.0_dp * chi + 10.0_dp)
+            drho_ij = -30.0_dp * chi**2 * (chi - 1.0_dp)**2
+            drho_ij = drho_ij / (rcut - rmin)
+            drho_ij = drho_ij * u_ij
+         end if
+      else if (pair_function == 'coscutoff') then
+         if (r_ij > rcut) then
+            rho_ij = 0.0_dp
+            drho_ij = 0.0_dp
+         else if (r_ij < rmin) then
+            rho_ij = 1.0_dp
+            drho_ij = 0.0_dp
+         else
+            rho_ij = 0.5_dp * (1.0_dp + cos(PI * (r_ij - rmin) / (rcut - rmin)))
+            drho_ij = u_ij * PI * sin(PI * (r_ij - rcut) / (rmin - rcut)) / (2.0_dp * (rmin - rcut))
+         end if
+      else
+         RAISE_ERROR('eam_density: unknown pair_function '//pair_function//'', error)
+      end if
+
+      rho_ij = prefactor * rho_ij
+      drho_ij = prefactor * drho_ij
+
+   endsubroutine eam_density_pair_function
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!!! Work of Jesper Byggmastar ENDS here
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!

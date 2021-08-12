@@ -147,3 +147,12 @@
       logical :: initialised = .false.
    endtype soap_express
 
+!!!!! Author: Jesper Byggmastar
+   type eam_density
+      real(dp) :: cutoff, rmin, prefactor
+      integer :: order, Z
+      character(STRING_LENGTH) :: pair_function
+
+      logical :: initialised = .false.
+
+   endtype eam_density
