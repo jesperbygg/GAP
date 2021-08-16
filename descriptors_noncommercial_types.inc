@@ -151,7 +151,7 @@
    type eam_density
       real(dp) :: cutoff, rmin, prefactor
       integer :: order, Z
-      character(STRING_LENGTH) :: pair_function
+      character(STRING_LENGTH) :: pair_function, mode
 
       logical :: initialised = .false.
 

@@ -4843,11 +4843,13 @@
       call initialise(params)
       call param_register(params, 'cutoff', '0.00', this%cutoff, help_string="Cutoff for eam_density-type descriptors")
       call param_register(params, 'pair_function', 'FSgen', this%pair_function, help_string="Pair density function rho_ij.")
-      call param_register(params, 'order', '2', this%order, help_string="Order n of polynomial pair density function (FSgen): (-1)^n * (r-rcut)^n / rcut**n")
+      call param_register(params, 'mode', 'blind', this%mode, help_string="How to treat density contributions. Choices: blind (default), EAM, FSsym, FSgen")
+      call param_register(params, 'order', '3', this%order, help_string="Order n of polynomial pair density function (FSgen): (-1)^n * (r-rcut)^n / rcut**n")
       call param_register(params, 'rmin', '0.00', this%rmin, help_string="Distance below which cutoff-like pair density functions are constant")
-      call param_register(params, 'prefactor', '1.00', this%prefactor, help_string="Optional prefactor of pair density function")
+      !call param_register(params, 'prefactor', '1.00', this%prefactor, help_string="Optional prefactor of pair density function")
       !call param_register(params, 'transition_width', '0.20', this%transition_width, help_string="Width of transition region from 1 to 0")
       call param_register(params, 'Z', '0', this%Z, help_string="Atomic number of central atom", altkey="Z_center")
+      ! TODO specify Zj (default all / wildcard)
 
       if (.not. param_read_line(params, args_str, ignore_unknown=.true.,task='eam_density_initialise args_str')) then
          RAISE_ERROR("eam_density_initialise failed to parse args_str='"//trim(args_str)//"'", error)
@@ -4867,6 +4869,7 @@
       if(.not. this%initialised) return
       this%cutoff = 0.0_dp
       this%pair_function = 'FSgen'
+      this%mode = 'blind'
       this%rmin = 0.0_dp
       this%order = 2
       !this%transition_width = 0.0_dp
@@ -4892,7 +4895,7 @@
       logical :: my_do_descriptor, my_do_grad_descriptor
       integer :: d, i, j, n, i_n, l_n_neighbours, i_desc, n_descriptors, n_cross, n_index
       integer, dimension(3) :: shift
-      real(dp) :: r_ij, rho_ij
+      real(dp) :: r_ij, rho_ij, prefactor
       real(dp), dimension(3) :: u_ij, drho_ij
 
       INIT_ERROR(error)
@@ -5003,10 +5006,11 @@
             if( r_ij >= this%cutoff ) cycle
             i_n = i_n + 1
 
-            if(my_do_descriptor) &
-               call eam_density_pair_function(this, r_ij, u_ij, this%pair_function, this%cutoff, this%rmin, &
-               this%order, this%prefactor, rho_ij, drho_ij, error)
+            if(my_do_descriptor) then
+               call eam_density_pair_function(this, r_ij, u_ij, at%Z(i), at%Z(j), this%pair_function, this%mode, this%cutoff, &
+                                              this%rmin, this%order, rho_ij, drho_ij, error)
                descriptor_out%x(i_desc)%data(1) = descriptor_out%x(i_desc)%data(1) + rho_ij
+            endif
 
             if(my_do_grad_descriptor) then
                !df_cut = dcoordination_function(r_ij,this%cutoff,this%transition_width) * u_ij
@@ -5086,20 +5090,34 @@
 
    endsubroutine eam_density_sizes
 
-   subroutine eam_density_pair_function(this, r_ij, u_ij, pair_function, rcut, rmin, order, prefactor, rho_ij, drho_ij, error)
+   subroutine eam_density_pair_function(this, r_ij, u_ij, Zi, Zj, pair_function, mode, rcut, rmin, order, rho_ij, drho_ij, error)
       type(eam_density), intent(in) :: this
-      integer, intent(in) :: order
+      integer, intent(in) :: order, Zi, Zj
       integer :: ii
-      real(dp), intent(in) :: r_ij, rcut, rmin, prefactor
-      character(STRING_LENGTH) :: pair_function
+      real(dp), intent(in) :: r_ij, rcut, rmin
+      character(STRING_LENGTH) :: pair_function, mode
       real(dp), intent(out) :: rho_ij
       real(dp), dimension(3), intent(out) :: drho_ij
       real(dp), dimension(3), intent(in) :: u_ij
-      real(dp) :: chi, help_var
+      real(dp) :: chi, prefactor
       real(dp), parameter :: PI = acos(-1.0_dp)
       integer, optional, intent(out) :: error
       INIT_ERROR(error)
 
+      ! choose prefactor for different ways of treating density contributions
+      if (mode == 'blind') then
+         prefactor = 1.0_dp
+      else if (mode == 'EAM') then
+         prefactor = Zj**0.5_dp / 10.0_dp
+      else if (mode == 'FSsym') then
+         prefactor = (Zj * Zi)**0.5_dp / 40.0_dp
+      else if (mode == 'FSgen') then
+         prefactor = (Zi * Zj)**0.5_dp / 10.0_dp / Zi**0.4_dp
+      else
+         RAISE_ERROR('eam_density: unknown mode for pair density, choose between: blind, EAM, FSsym, FSgen. Now: '//mode//'', error)
+      end if
+
+      ! choose and compute pair density function
       if (pair_function == 'FSgen') then
          rho_ij = (-1)**order * (r_ij - rcut)**order / rcut**order
          drho_ij = (-1)**order * order * (r_ij - rcut)**(order - 1) / rcut**order * u_ij
