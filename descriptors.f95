@@ -3237,7 +3237,8 @@ module descriptors_module
       character(len=STRING_LENGTH), dimension(:), allocatable, intent(out) :: descriptor_str
       integer, optional, intent(out) :: error
 
-      integer :: my_descriptor_type, i, j, k, l, n_species, order, n
+      integer :: my_descriptor_type, i, j, k, l, n_species, order, n, di
+      logical :: add_species_separately
       integer, dimension(:,:), allocatable :: ZN
       real(dp), dimension(:), allocatable :: w
       type(Dictionary) :: params
@@ -3281,7 +3282,7 @@ module descriptors_module
             enddo
          enddo
 
-      case(DT_COORDINATION,DT_RDF,DT_EAM_DENSITY)
+      case(DT_COORDINATION,DT_RDF)
          allocate(descriptor_str(n_species))
          do i = 1, n_species
             descriptor_str(i) = trim(this)//" Z="//species(i)
@@ -3321,6 +3322,30 @@ module descriptors_module
             descriptor_str(i) = trim(this)//" Z={"//ZN(:,i)//"}"
          enddo
          deallocate(ZN)
+
+      case(DT_EAM_DENSITY)
+         call initialise(params)
+         call param_register(params, 'add_species_separately', 'F', add_species_separately, help_string="test")
+         if (.not. param_read_line(params, this, ignore_unknown=.true.,task='descriptor_str_add_species this')) then
+            RAISE_ERROR("descriptor_str_add_species failed to parse descriptor string='"//trim(this)//"'", error)
+         endif
+         call finalise(params)
+
+         if (add_species_separately) then
+            allocate(descriptor_str(n_species*n_species))
+            di = 1
+            do i = 1, n_species
+               do j = 1, n_species
+                  descriptor_str(di) = trim(this)//" Z="//species(i)//" Zj={"//species(j)//"}"
+                  di = di + 1
+               enddo
+            enddo
+         else
+            allocate(descriptor_str(n_species))
+            do i = 1, n_species
+               descriptor_str(i) = trim(this)//" Z="//species(i)
+            enddo
+         end if
 
       case(DT_SOAP_EXPRESS)
          RAISE_ERROR("descriptor_str_add_species: no recipe for "//my_descriptor_type//" yet.",error)

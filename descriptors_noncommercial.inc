@@ -4834,6 +4834,8 @@
       type(eam_density), intent(inout) :: this
       character(len=*), intent(in) :: args_str
       integer, optional, intent(out) :: error
+      character(len=STRING_LENGTH) :: Zj_str
+      logical :: has_Zj, has_n_Zj
 
       type(Dictionary) :: params
 
@@ -4849,7 +4851,23 @@
       !call param_register(params, 'prefactor', '1.00', this%prefactor, help_string="Optional prefactor of pair density function")
       !call param_register(params, 'transition_width', '0.20', this%transition_width, help_string="Width of transition region from 1 to 0")
       call param_register(params, 'Z', '0', this%Z, help_string="Atomic number of central atom", altkey="Z_center")
-      ! TODO specify Zj (default all / wildcard)
+      call param_register(params, 'Zj', '', Zj_str, has_value_target=has_Zj, help_string="Atomic numbers of neighbours to include")
+      call param_register(params, 'n_Zj', '1', this%n_Zj, has_value_target=has_n_Zj, help_string="Number of elements of neighbours to include")
+
+      allocate(this%Zj(this%n_Zj))
+      if( has_Zj .and. .not. has_n_Zj ) then
+         RAISE_ERROR("eam_density_initialise: if Zj are specified, n_Zj must also be given.",error)
+      endif
+
+      if( has_n_Zj ) then
+         if(this%n_Zj == 1) then
+            call param_register(params, 'Zj', '0', this%Zj(1), help_string="Atomic numbers of neighbours to include")
+         else
+            call param_register(params, 'Zj', '//MANDATORY//', this%Zj, help_string="Atomic numbers of neighbours to include")
+         endif
+      else
+         call param_register(params, 'Zj', '0', this%Zj(1), help_string="Atomic numbers of neighbours to include")
+      endif
 
       if (.not. param_read_line(params, args_str, ignore_unknown=.true.,task='eam_density_initialise args_str')) then
          RAISE_ERROR("eam_density_initialise failed to parse args_str='"//trim(args_str)//"'", error)
@@ -4871,9 +4889,12 @@
       this%pair_function = 'FSgen'
       this%mode = 'blind'
       this%rmin = 0.0_dp
-      this%order = 2
+      this%order = 0
       !this%transition_width = 0.0_dp
       this%Z = 0
+      this%n_Zj = 0
+
+      if(allocated(this%Zj)) deallocate(this%Zj)
 
       this%initialised = .false.
 
@@ -4891,9 +4912,10 @@
       character(STRING_LENGTH) :: atom_mask_name
       logical :: has_atom_mask_name
       logical, dimension(:), pointer :: atom_mask_pointer
+      integer, dimension(total_elements) :: species_map
 
       logical :: my_do_descriptor, my_do_grad_descriptor
-      integer :: d, i, j, n, i_n, l_n_neighbours, i_desc, n_descriptors, n_cross, n_index
+      integer :: d, i, j, n, i_n, l_n_neighbours, i_desc, n_descriptors, n_cross, n_index, i_species
       integer, dimension(3) :: shift
       real(dp) :: r_ij, rho_ij, prefactor
       real(dp), dimension(3) :: u_ij, drho_ij
@@ -4905,6 +4927,15 @@
       if(.not. this%initialised) then
          RAISE_ERROR("eam_density_calc: descriptor object not initialised", error)
       endif
+
+      species_map = 0
+      do j = 1, size(this%Zj)
+         if(this%Zj(j) == 0) then
+            species_map = 1
+         else
+            species_map(this%Zj(j)) = j
+         endif
+      enddo
 
       my_do_descriptor = optional_default(.false., do_descriptor)
       my_do_grad_descriptor = optional_default(.false., do_grad_descriptor)
@@ -5003,7 +5034,10 @@
          do n = 1, n_neighbours(at,i) 
             j = neighbour(at, i, n, distance = r_ij, cosines = u_ij, shift=shift) 
 
+            i_species = species_map(at%Z(j))
+            if( i_species == 0 ) cycle
             if( r_ij >= this%cutoff ) cycle
+
             i_n = i_n + 1
 
             if(my_do_descriptor) then
