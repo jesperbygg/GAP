@@ -440,12 +440,12 @@ module descriptors_module
    type soap_turbo
       ! User controllable parameters
       real(dp) :: rcut_hard, rcut_soft, nf
-      integer  :: n_species, radial_enhancement, central_index, l_max
-      character(len=STRING_LENGTH) :: basis, scaling_mode, compress_file
+      integer  :: n_species, radial_enhancement, central_index, l_max, compress_P_nonzero
+      character(len=STRING_LENGTH) :: basis, scaling_mode, compress_file, compress_mode
 
       real(dp), dimension(:), allocatable :: atom_sigma_r, atom_sigma_r_scaling, &
-         atom_sigma_t, atom_sigma_t_scaling, amplitude_scaling, central_weight
-      integer, dimension(:), allocatable :: species_Z, alpha_max, compress_indices
+         atom_sigma_t, atom_sigma_t_scaling, amplitude_scaling, central_weight, compress_P_el
+      integer, dimension(:), allocatable :: species_Z, alpha_max, compress_P_i, compress_P_j
 
       logical :: initialised = .false., compress = .false.
    endtype soap_turbo
@@ -3065,6 +3065,8 @@ module descriptors_module
    endsubroutine distance_Nb_permutations
 
    subroutine soap_turbo_initialise(this,args_str,error)
+      use soap_turbo_compress_module
+
       type(soap_turbo), intent(inout) :: this
       character(len=*), intent(in) :: args_str
       integer, optional, intent(out) :: error
@@ -3073,9 +3075,10 @@ module descriptors_module
 
       logical :: has_atom_sigma_angular
 
-      integer :: l, k, i, j, m, n
+      integer :: l, k, i, j, m, n, n_nonzero
       real(dp) :: fact, fact1, fact2, ppi, atom_sigma_radial_normalised, cutoff_hard,&
          s2, I_n, N_n, N_np1, N_np2, I_np1, I_np2, C2
+      character(len=64) :: compress_string
 
       type(LA_Matrix) :: LA_overlap
       real(dp), dimension(:), allocatable :: s
@@ -3096,6 +3099,7 @@ module descriptors_module
       call param_register(params, 'basis', "poly3", this%basis, help_string="poly3 or poly3gauss")
       call param_register(params, 'scaling_mode', "polynomial", this%scaling_mode, help_string="TODO")
       call param_register(params, 'compress_file', "None", this%compress_file, help_string="TODO")
+      call param_register(params, 'compress_mode', "None", this%compress_mode, help_string="TODO")
       call param_register(params, 'central_index', "1", this%central_index, help_string="Index of central atom species_Z in the >species< array")
 
       if (.not. param_read_line(params, args_str, ignore_unknown=.true.,task='soap_turbo_initialise args_str')) then
@@ -3103,17 +3107,6 @@ module descriptors_module
       endif
 
       call finalise(params)
-
-      if( this%compress_file /= "None" )then
-        this%compress = .true.
-        open(unit=10, file=this%compress_file, status="old")
-        read(10, *) (i, j=1,this%n_species), i, n
-        allocate(this%compress_indices(1:n))
-                do i = 1, n
-          read(10, *) this%compress_indices(i)
-        end do
-        close(10)
-      end if
 
       allocate(this%atom_sigma_r(this%n_species))
       allocate(this%atom_sigma_r_scaling(this%n_species))
@@ -3161,11 +3154,60 @@ module descriptors_module
             help_string="Atomic number of species, including the central atom")
       endif
 
-
       if (.not. param_read_line(params, args_str, ignore_unknown=.true.,task='soap_turbo_initialise args_str')) then
          RAISE_ERROR("soap_turbo_initialise failed to parse args_str='"//trim(args_str)//"'", error)
       endif
       call finalise(params)
+
+!     Here we read in the compression information from a file (compress_file) or rely on a keyword provided
+!     by the user (compress_mode) which leads to a predefined recipe to compress the soap_turbo descriptor
+!     The file always takes precedence over the keyword.
+      if( this%compress_file /= "None" )then
+        this%compress = .true.
+        open(unit=10, file=this%compress_file, status="old")
+        read(10, *) (i, j=1,this%n_species), i, n
+        read(10, '(A)') compress_string
+        if( compress_string == "P_transformation" )then
+          n_nonzero = -1
+          do while( compress_string /= "end_transformation" )
+            read(10, '(A)') compress_string
+            n_nonzero = n_nonzero + 1
+          end do
+          this%compress_P_nonzero = n_nonzero
+          allocate( this%compress_P_el(1:n_nonzero) )
+          allocate( this%compress_P_i(1:n_nonzero) )
+          allocate( this%compress_P_j(1:n_nonzero) )
+          do i = 1, n_nonzero+1
+            backspace(10)
+          end do
+          do i = 1, n_nonzero
+            read(10,*) this%compress_P_i(i), this%compress_P_j(i), this%compress_P_el(i)
+          end do
+        else
+!         Old way to handle compression for backcompatibility
+          backspace(10)
+          this%compress_P_nonzero = n
+          allocate( this%compress_P_el(1:n) )
+          allocate( this%compress_P_i(1:n) )
+          allocate( this%compress_P_j(1:n) )
+          do i = 1, n
+            read(10, *) this%compress_P_j(i)
+            this%compress_P_i(i) = i
+            this%compress_P_el(i) = 1.0_dp
+          end do
+        end if
+        close(10)
+      else if( this%compress_mode /= "None" )then
+        this%compress = .true.
+        call get_compress_indices( this%compress_mode, this%alpha_max, this%l_max, n, this%compress_P_nonzero, &
+                                   this%compress_P_i, this%compress_P_j, this%compress_P_el, "get_dim" )
+        allocate( this%compress_P_i(1:this%compress_P_nonzero) )
+        allocate( this%compress_P_j(1:this%compress_P_nonzero) )
+        allocate( this%compress_P_el(1:this%compress_P_nonzero) )
+        call get_compress_indices( this%compress_mode, this%alpha_max, this%l_max, n, this%compress_P_nonzero, &
+                                   this%compress_P_i, this%compress_P_j, this%compress_P_el, "set_indices" )
+      end if
+
 
       this%initialised = .true.
 
@@ -3498,7 +3540,11 @@ module descriptors_module
       integer, optional, intent(out) :: error
 
       type(descriptor_data) :: my_descriptor_data
+      type(Dictionary) :: params
       integer :: i, n, i_d, n_descriptors, n_cross, n_index
+      character(STRING_LENGTH) :: atom_mask_name
+      logical :: has_atom_mask_name
+      logical, dimension(:), pointer :: atom_mask_pointer
       logical :: do_grad_descriptor, do_descriptor
 
       INIT_ERROR(error)
@@ -3506,7 +3552,35 @@ module descriptors_module
       do_descriptor = present(descriptor_out)
       do_grad_descriptor = present(grad_descriptor_out) .or. present(grad_descriptor_index) .or. present(grad_descriptor_pos)
 
-      call descriptor_sizes(this,at,n_descriptors,n_cross,n_index=n_index,error=error)
+      atom_mask_pointer => null()
+      if(present(args_str)) then
+         call initialise(params)
+         
+         call param_register(params, 'atom_mask_name', 'NONE', atom_mask_name, has_value_target=has_atom_mask_name, &
+         help_string="Name of a logical property in the atoms object. For atoms where this property is true descriptors are " // &
+         "calculated.")
+
+         if (.not. param_read_line(params,args_str,ignore_unknown=.true.,task='descriptor_calc_array args_str')) then
+            RAISE_ERROR("descriptor_calc_array failed to parse args_str='"//trim(args_str)//"'", error)
+         endif
+         
+         call finalise(params)
+
+         if( has_atom_mask_name ) then
+            if (.not. assign_pointer(at, trim(atom_mask_name), atom_mask_pointer)) then
+               RAISE_ERROR("descriptor_calc_array did not find "//trim(atom_mask_name)//" property in the atoms object.", error)
+            endif
+         else
+            atom_mask_pointer => null()
+         endif
+
+      endif
+
+      if (associated(atom_mask_pointer)) then
+         call descriptor_sizes(this,at,n_descriptors,n_cross,mask=atom_mask_pointer,n_index=n_index,error=error)
+      else
+         call descriptor_sizes(this,at,n_descriptors,n_cross,n_index=n_index,error=error)
+      endif
 
       call calc(this,at,my_descriptor_data,do_descriptor=do_descriptor,do_grad_descriptor=do_grad_descriptor,args_str=args_str,error=error)
 
@@ -9147,7 +9221,8 @@ module descriptors_module
             n_atom_pairs, mask, rjs, thetas, phis, this%alpha_max, this%l_max, rcut_hard, rcut_soft, nf, &
             global_scaling, this%atom_sigma_r, this%atom_sigma_r_scaling, &
             this%atom_sigma_t, this%atom_sigma_t_scaling, this%amplitude_scaling, this%radial_enhancement, this%central_weight, &
-            this%basis, this%scaling_mode, .false., my_do_grad_descriptor, this%compress, this%compress_indices, descriptor_i, grad_descriptor_i)
+            this%basis, this%scaling_mode, .false., my_do_grad_descriptor, this%compress, this%compress_P_nonzero, this%compress_P_i, &
+            this%compress_P_j, this%compress_P_el, descriptor_i, grad_descriptor_i)
 
          if(my_do_descriptor) then
             descriptor_out%x(i_desc)%data = descriptor_i(:,1)
@@ -11300,7 +11375,7 @@ call print("mask present ? "//present(mask))
       endif
 
       if( this%compress )then
-         i = size(this%compress_indices)
+         i = maxval(this%compress_P_i)
       else
          n_max = sum(this%alpha_max)
          i = ( this%l_max+1 ) * ( n_max*(n_max+1) ) / 2

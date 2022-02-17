@@ -50,7 +50,7 @@ else
   GAP1_F95_FILES = 
 endif
 
-SOAP_TURBO_F95_FILES = soap_turbo_functions soap_turbo_radial soap_turbo_angular soap_turbo
+SOAP_TURBO_F95_FILES = soap_turbo_functions soap_turbo_radial soap_turbo_angular soap_turbo_compress soap_turbo
 SOAP_TURBO_F95_SOURCES =  ${addsuffix .f90, ${SOAP_TURBO_F95_FILES}}
 SOAP_TURBO_F95_OBJS =  ${addsuffix .o, ${SOAP_TURBO_F95_FILES}}
 
@@ -123,7 +123,7 @@ install:
 	    echo "Copying $$f to ${QUIP_INSTALLDIR}/$${f}${QUIP_MPI_SUFFIX}" ; \
 	    cp $$f ${QUIP_INSTALLDIR}/$${f}${QUIP_MPI_SUFFIX} ; \
 	  done ;\
-	  cp ${QUIP_ROOT}/src/GAP/teach_sparse ${QUIP_INSTALLDIR}; \
+	  #cp ${QUIP_ROOT}/src/GAP/teach_sparse ${QUIP_INSTALLDIR}; \
 	fi
 
 
