@@ -5153,8 +5153,15 @@
 
       ! choose and compute pair density function
       if (pair_function == 'FSgen') then
-         rho_ij = (-1)**order * (r_ij - rcut)**order / rcut**order
-         drho_ij = (-1)**order * order * (r_ij - rcut)**(order - 1) / rcut**order * u_ij
+         ! rho_ij = (-1)**order * (r_ij - rcut)**order / rcut**order
+         ! drho_ij = (-1)**order * order * (r_ij - rcut)**(order - 1) / rcut**order * u_ij
+         if (r_ij > rcut) then
+            rho_ij = 0.0_dp
+            drho_ij = 0.0_dp
+         else
+            rho_ij = (1.0_dp - r_ij / rcut)**order
+            drho_ij = -order * (1.0_dp - r_ij / rcut)**(order - 1) / rcut * u_ij
+         end if
       else if (pair_function == 'polycutoff') then
          if (r_ij > rcut) then
             rho_ij = 0.0_dp
