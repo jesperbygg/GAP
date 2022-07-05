@@ -754,9 +754,9 @@ module gp_predict_module
 
       character(len=STRING_LENGTH) :: my_condition_number_norm
 
-      integer :: i, j, blocksize
+      integer :: i, j, mb_A, nb_A
       integer :: i_coordinate, i_sparseX, i_global_sparseX, n_globalSparseX, n_globalY, i_y, i_yPrime, &
-      i_globalY, i_global_yPrime, nlrows
+      i_globalY, i_global_yPrime, nrows
 #ifdef HAVE_QR
       real(qp) :: rcond
       real(qp), dimension(:,:), allocatable :: c_subYY_sqrtInverseLambda, factor_c_subYsubY, a
@@ -799,12 +799,11 @@ module gp_predict_module
 
       allocate(alpha(n_globalSparseX))
       if (task_manager%active) then
-         blocksize = get_blocksize(task_manager%idata(1), task_manager%unified_workload, n_globalSparseX)
-         nlrows = increase_to_multiple(task_manager%unified_workload, blocksize)
-         i = nlrows - task_manager%unified_workload
-         call print("distA extension: "//i//" "//n_globalSparseX//" memory "//i2si(8_idp * i * n_globalSparseX)//"B", PRINT_VERBOSE)
-         allocate(globalY(nlrows))
-         allocate(a(nlrows,n_globalSparseX))
+         nrows = task_manager%idata(1)
+         mb_A = task_manager%idata(2)
+         nb_A = task_manager%idata(3)
+         allocate(globalY(nrows))
+         allocate(a(nrows,n_globalSparseX))
          alpha = 0.0_qp
          globalY = 0.0_qp
          a = 0.0_qp
@@ -853,7 +852,7 @@ module gp_predict_module
 
       if (task_manager%active) then
          call print("Using ScaLAPACK to solve QR")
-         call SP_Matrix_QR_Solve(a, globalY, alpha, task_manager%ScaLAPACK_obj, blocksize)
+         call SP_Matrix_QR_Solve(a, globalY, alpha, task_manager%ScaLAPACK_obj, mb_A, nb_A)
       else
          call print("Using LAPACK to solve QR")
          call initialise(LA_q_subYsubY, a, use_allocate=.false.)
@@ -975,19 +974,6 @@ module gp_predict_module
          end if
       end do
    end subroutine get_shared_task_counts
-
-   function get_blocksize(arg, nrows, ncols) result(blocksize)
-      integer, intent(in) :: arg, nrows, ncols
-      integer :: blocksize
-
-      integer, parameter :: OVERHEAD_FACTOR = 2  ! worst case: +1/2=50% matrix size
-
-      if (arg > 0) then
-         blocksize = arg
-      else
-         blocksize = merge(nrows, ncols, (nrows < ncols * OVERHEAD_FACTOR))
-      end if
-   end function get_blocksize
 
    subroutine gpSparse_finalise(this,error)
       type(gpSparse), intent(inout) :: this
@@ -2269,8 +2255,8 @@ module gp_predict_module
             gpCoordinates_Covariance = gpCoordinates_Covariance + covariancePP_ij
 
             if( ( present(grad_Covariance_i) .or. present(grad_Covariance_j) ) .and. (r_ij > 0.0_dp) ) then
-               grad_covariancePP_ij = grad_covariancePP(r_ij,PP_Q, this%d) / r_ij
-               !xI_xJ(:) = x_i(this%permutations(:,i_p)) - x_j(:)
+               grad_covariancePP_ij = this%delta**2 * grad_covariancePP(r_ij,PP_Q, this%d) / r_ij
+               xI_xJ(:) = x_i(this%permutations(:,i_p)) - x_j(:)
 
                if(present(grad_Covariance_i)) &
                   grad_Covariance_i(this%permutations(:,i_p)) = grad_Covariance_i(this%permutations(:,i_p)) + grad_covariancePP_ij * xI_xJ(:)
@@ -3630,6 +3616,19 @@ module gp_predict_module
          RAISE_ERROR('gpCoordinates_Predict: object not initialised', error)
       endif
 
+      my_do_variance_estimate = present(variance_estimate) .and. optional_default(.false.,do_variance_estimate)
+
+      if( this%n_sparseX == 0 ) then
+         gpCoordinates_Predict = 0.0_dp
+         if( present(gradPredict) ) gradPredict = 0.0_dp
+         if( my_do_variance_estimate ) then
+            variance_estimate = 0.0_dp
+            if( present( grad_variance_estimate ) ) grad_variance_estimate = 0.0_dp
+         endif
+         return
+      endif
+
+
       if(this%covariance_type == COVARIANCE_BOND_REAL_SPACE) then
 #ifdef _OPENMP  
          if (OMP_IN_PARALLEL()) then  
@@ -3822,7 +3821,6 @@ module gp_predict_module
             call dgemv('N', size(grad_k,1), size(grad_k,2), 1.0_dp, grad_k(1,1), size(grad_k,1), &  
                this%alpha(1), 1, 0.0_dp, gradPredict(1), 1)  
       endif
-      my_do_variance_estimate = present(variance_estimate) .and. optional_default(.false.,do_variance_estimate)  
 
       if(my_do_variance_estimate) then  
          allocate(k_mm_k(this%n_sparseX))
@@ -3955,6 +3953,8 @@ module gp_predict_module
          endif
       endif
 
+      if( this%n_sparseX == 0 ) return
+
       if( regularisation < 0.0_dp ) then
          RAISE_ERROR("gpCoordinates_initialise_variance_estimate: regularisation ("//regularisation//") is negative.",error)  
       elseif( regularisation == 0.0_dp ) then
@@ -4056,6 +4056,11 @@ module gp_predict_module
 
       if( .not. this%initialised ) then
          RAISE_ERROR('gpCoordinates_log_likelihood: object not initialised', error)
+      endif
+
+      if( this%n_sparseX == 0 ) then
+         log_likelihood = 0.0_dp
+         return
       endif
 
       was_initialised = this%variance_estimate_initialised
