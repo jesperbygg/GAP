@@ -247,6 +247,7 @@ module descriptors_module
       real(dp) :: cutoff
       real(dp) :: cutoff_transition_width
       integer :: Z, Z1, Z2
+      logical :: jk_cutoff
 
       logical :: initialised = .false.
 
@@ -1888,6 +1889,7 @@ module descriptors_module
       call param_register(params, 'Z_center', '0', this%Z, help_string="Atomic number of central atom", altkey="Z")
       call param_register(params, 'Z1', '0', this%Z1, help_string="Atomic number of neighbour #1")
       call param_register(params, 'Z2', '0', this%Z2, help_string="Atomic number of neighbour #2")
+      call param_register(params, 'jk_cutoff', 'F', this%jk_cutoff, help_string="Apply cutoff function on jk bond")
 
       if (.not. param_read_line(params, args_str, ignore_unknown=.true.,task='angle_3b_initialise args_str')) then
          RAISE_ERROR("angle_3b_initialise failed to parse args_str='"//trim(args_str)//"'", error)
@@ -4809,7 +4811,7 @@ module descriptors_module
       logical :: my_do_descriptor, my_do_grad_descriptor, Zk1, Zk2, Zj1, Zj2
       integer :: d, n_descriptors, n_cross, i_desc, i, j, k, n, m, n_index
       integer, dimension(3) :: shift_ij, shift_ik
-      real(dp) :: r_ij, r_ik, r_jk, cos_ijk, fc_j, fc_k, dfc_j, dfc_k
+      real(dp) :: r_ij, r_ik, r_jk, cos_ijk, fc_j, fc_k, dfc_j, dfc_k, fc_jk, dfc_jk
       real(dp), dimension(3) :: u_ij, u_ik, u_jk, d_ij, d_ik, d_jk, dcosijk_ij, dcosijk_ik
 
       INIT_ERROR(error)
@@ -4918,9 +4920,12 @@ module descriptors_module
                d_jk = d_ij - d_ik
                r_jk = norm(d_jk)
                u_jk = d_jk / r_jk
+               if( (this%jk_cutoff) .and. (r_jk >= this%cutoff) ) cycle
 
                fc_k = coordination_function(r_ik,this%cutoff,this%cutoff_transition_width)
                dfc_k = dcoordination_function(r_ik,this%cutoff,this%cutoff_transition_width)
+               fc_jk = coordination_function(r_jk,this%cutoff,this%cutoff_transition_width)
+               dfc_jk = dcoordination_function(r_jk,this%cutoff,this%cutoff_transition_width)
 
                cos_ijk = dot_product(d_ij,d_ik)/(r_ij*r_ik)
 
@@ -4933,7 +4938,11 @@ module descriptors_module
                   descriptor_out%x(i_desc)%ci(1) = i
                   descriptor_out%x(i_desc)%has_data = .true.
 
-                  descriptor_out%x(i_desc)%covariance_cutoff = fc_j*fc_k
+                  if(this%jk_cutoff) then
+                     descriptor_out%x(i_desc)%covariance_cutoff = fc_j*fc_k*fc_jk
+                  else
+                     descriptor_out%x(i_desc)%covariance_cutoff = fc_j*fc_k
+                  endif
                endif
 
                if(my_do_grad_descriptor) then
@@ -4947,7 +4956,11 @@ module descriptors_module
                   descriptor_out%x(i_desc)%grad_data(2,:,0) = 2.0_dp * (r_ij - r_ik)*(-u_ij + u_ik)
                   descriptor_out%x(i_desc)%grad_data(3,:,0) = 0.0_dp !-dcosijk_ij - dcosijk_ik
 
-                  descriptor_out%x(i_desc)%grad_covariance_cutoff(:,0) = - dfc_j*fc_k*u_ij - dfc_k*fc_j*u_ik
+                  if(this%jk_cutoff) then
+                     descriptor_out%x(i_desc)%grad_covariance_cutoff(:,0) = - dfc_j*fc_k*fc_jk*u_ij - dfc_k*fc_j*fc_jk*u_ik
+                  else
+                     descriptor_out%x(i_desc)%grad_covariance_cutoff(:,0) = - dfc_j*fc_k*u_ij - dfc_k*fc_j*u_ik
+                  endif
 
                   descriptor_out%x(i_desc)%ii(1) = j
                   descriptor_out%x(i_desc)%pos(:,1) = at%pos(:,j) + matmul(at%lattice,shift_ij)
@@ -4956,7 +4969,11 @@ module descriptors_module
                   descriptor_out%x(i_desc)%grad_data(2,:,1) = 2.0_dp * (r_ij - r_ik)*u_ij
                   descriptor_out%x(i_desc)%grad_data(3,:,1) = u_jk !dcosijk_ij
 
-                  descriptor_out%x(i_desc)%grad_covariance_cutoff(:,1) = dfc_j*fc_k*u_ij
+                  if(this%jk_cutoff) then
+                     descriptor_out%x(i_desc)%grad_covariance_cutoff(:,1) = dfc_j*fc_k*fc_jk*u_ij + fc_j*fc_k*dfc_jk*u_jk
+                  else
+                     descriptor_out%x(i_desc)%grad_covariance_cutoff(:,1) = dfc_j*fc_k*u_ij
+                  endif
 
                   descriptor_out%x(i_desc)%ii(2) = k
                   descriptor_out%x(i_desc)%pos(:,2) = at%pos(:,k) + matmul(at%lattice,shift_ik)
@@ -4965,7 +4982,12 @@ module descriptors_module
                   descriptor_out%x(i_desc)%grad_data(2,:,2) = 2.0_dp * (r_ij - r_ik)*(-u_ik)
                   descriptor_out%x(i_desc)%grad_data(3,:,2) = -u_jk !dcosijk_ik
 
-                  descriptor_out%x(i_desc)%grad_covariance_cutoff(:,2) = dfc_k*fc_j*u_ik
+                  if(this%jk_cutoff) then
+                     descriptor_out%x(i_desc)%grad_covariance_cutoff(:,2) = dfc_k*fc_j*fc_jk*u_ik + fc_j*fc_k*dfc_jk*u_jk
+                  else
+                     descriptor_out%x(i_desc)%grad_covariance_cutoff(:,2) = dfc_k*fc_j*u_ik
+                  endif
+
                endif
             enddo
          enddo
@@ -10720,7 +10742,8 @@ module descriptors_module
       integer, optional, intent(out) :: error
 
       integer :: i, j, k, n, m
-      real(dp) :: r_ij, r_ik
+      real(dp) :: r_ij, r_ik, r_jk
+      real(dp), dimension(3) :: d_ij, d_ik, d_jk
       logical :: Zk1, Zk2, Zj1, Zj2
 
       INIT_ERROR(error)
@@ -10739,7 +10762,7 @@ module descriptors_module
          endif
 
          do n = 1, n_neighbours(at,i) 
-            j = neighbour(at, i, n, distance = r_ij) 
+            j = neighbour(at, i, n, distance = r_ij, diff = d_ij)
             if( r_ij >= this%cutoff ) cycle
 
             Zj1 = (this%Z1 == 0) .or. (at%Z(j) == this%Z1)
@@ -10748,8 +10771,12 @@ module descriptors_module
             do m = 1, n_neighbours(at,i) 
                if( n == m ) cycle
 
-               k = neighbour(at, i, m, distance = r_ik) 
+               k = neighbour(at, i, m, distance = r_ik, diff = d_ik)
                if( r_ik >= this%cutoff ) cycle
+
+               d_jk = d_ij - d_ik
+               r_jk = norm(d_jk)
+               if( (this%jk_cutoff) .and. (r_jk >= this%cutoff) ) cycle
 
                Zk1 = (this%Z1 == 0) .or. (at%Z(k) == this%Z1)
                Zk2 = (this%Z2 == 0) .or. (at%Z(k) == this%Z2)
