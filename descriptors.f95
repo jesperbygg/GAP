@@ -4983,7 +4983,7 @@ module descriptors_module
                   descriptor_out%x(i_desc)%grad_data(3,:,2) = -u_jk !dcosijk_ik
 
                   if(this%jk_cutoff) then
-                     descriptor_out%x(i_desc)%grad_covariance_cutoff(:,2) = dfc_k*fc_j*fc_jk*u_ik + fc_j*fc_k*dfc_jk*u_jk
+                     descriptor_out%x(i_desc)%grad_covariance_cutoff(:,2) = dfc_k*fc_j*fc_jk*u_ik - fc_j*fc_k*dfc_jk*u_jk
                   else
                      descriptor_out%x(i_desc)%grad_covariance_cutoff(:,2) = dfc_k*fc_j*u_ik
                   endif
