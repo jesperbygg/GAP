@@ -52,7 +52,7 @@ module gap_fit_module
 
   integer, parameter :: SPARSE_LENGTH = 10000
   integer, parameter :: THETA_LENGTH = 10000
-  integer, parameter :: GAP_STRING_SIZE = 200
+  integer, parameter :: GAP_STRING_SIZE = 2000
 
   integer, parameter :: E0_ISOLATED = 1
   integer, parameter :: E0_AVERAGE = 2
