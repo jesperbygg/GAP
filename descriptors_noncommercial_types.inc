@@ -163,7 +163,7 @@
 
 !!!!! Author: Jesper Byggmästar
    type eam_density
-      real(dp) :: cutoff, rmin, prefactor
+      real(dp) :: cutoff, rmin
       integer :: order, Z, n_Zj
       character(STRING_LENGTH) :: pair_function, mode
       integer, dimension(:), allocatable :: Zj

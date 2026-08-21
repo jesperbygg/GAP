@@ -5303,8 +5303,6 @@ endsubroutine water_trimer_calc !///////////////////////////////////////////////
       type(eam_density), intent(inout) :: this
       character(len=*), intent(in) :: args_str
       integer, optional, intent(out) :: error
-      character(len=STRING_LENGTH) :: Zj_str
-      logical :: has_Zj, has_n_Zj
 
       type(Dictionary) :: params
 
@@ -5313,35 +5311,44 @@ endsubroutine water_trimer_calc !///////////////////////////////////////////////
       call finalise(this)
       call initialise(params)
       call param_register(params, 'cutoff', '0.00', this%cutoff, help_string="Cutoff for eam_density-type descriptors")
-      call param_register(params, 'pair_function', 'FSgen', this%pair_function, help_string="Pair density function rho_ij.")
+      call param_register(params, 'pair_function', 'FSgen', this%pair_function, help_string="Pair density function rho_ij. Choices: FSgen (default), polycutoff, coscutoff")
       call param_register(params, 'mode', 'blind', this%mode, help_string="How to treat density contributions. Choices: blind (default), EAM, FSsym, FSgen")
       call param_register(params, 'order', '3', this%order, help_string="Order n of polynomial pair density function (FSgen): (-1)^n * (r-rcut)^n / rcut**n")
-      call param_register(params, 'rmin', '0.00', this%rmin, help_string="Distance below which cutoff-like pair density functions are constant")
-      !call param_register(params, 'prefactor', '1.00', this%prefactor, help_string="Optional prefactor of pair density function")
-      !call param_register(params, 'transition_width', '0.20', this%transition_width, help_string="Width of transition region from 1 to 0")
+      call param_register(params, 'rmin', '0.00', this%rmin, help_string="Distance below which polycutoff and coscutoff pair density functions are constant (unused by FSgen)")
       call param_register(params, 'Z', '0', this%Z, help_string="Atomic number of central atom", altkey="Z_center")
-      call param_register(params, 'Zj', '', Zj_str, has_value_target=has_Zj, help_string="Atomic numbers of neighbours to include")
-      call param_register(params, 'n_Zj', '1', this%n_Zj, has_value_target=has_n_Zj, help_string="Number of elements of neighbours to include")
-
-      allocate(this%Zj(this%n_Zj))
-      if( has_Zj .and. .not. has_n_Zj ) then
-         RAISE_ERROR("eam_density_initialise: if Zj are specified, n_Zj must also be given.",error)
-      endif
-
-      if( has_n_Zj ) then
-         if(this%n_Zj == 1) then
-            call param_register(params, 'Zj', '0', this%Zj(1), help_string="Atomic numbers of neighbours to include")
-         else
-            call param_register(params, 'Zj', '//MANDATORY//', this%Zj, help_string="Atomic numbers of neighbours to include")
-         endif
-      else
-         call param_register(params, 'Zj', '0', this%Zj(1), help_string="Atomic numbers of neighbours to include")
-      endif
+      call param_register(params, 'n_Zj', '1', this%n_Zj, help_string="Number of elements of neighbours to include")
 
       if (.not. param_read_line(params, args_str, ignore_unknown=.true.,task='eam_density_initialise args_str')) then
          RAISE_ERROR("eam_density_initialise failed to parse args_str='"//trim(args_str)//"'", error)
       endif
       call finalise(params)
+
+      ! deallocate here as well as in finalise: if a previous initialise
+      ! failed after allocation, finalise skips cleanup when initialised is false
+      if(allocated(this%Zj)) deallocate(this%Zj)
+      allocate(this%Zj(this%n_Zj))
+      call initialise(params)
+      if( this%n_Zj == 1 ) then
+         call param_register(params, 'Zj', '0', this%Zj(1), help_string="Atomic number of neighbour species to include; 0 means all species")
+      else
+         call param_register(params, 'Zj', '//MANDATORY//', this%Zj, help_string="Atomic numbers of neighbour species to include")
+      endif
+      if (.not. param_read_line(params, args_str, ignore_unknown=.true.,task='eam_density_initialise args_str')) then
+         RAISE_ERROR("eam_density_initialise failed to parse args_str='"//trim(args_str)//"'", error)
+      endif
+      call finalise(params)
+
+      if( this%cutoff <= 0.0_dp ) then
+         RAISE_ERROR("eam_density_initialise: cutoff must be positive, got "//this%cutoff,error)
+      endif
+      if( this%order < 1 ) then
+         RAISE_ERROR("eam_density_initialise: order must be >= 1, got "//this%order,error)
+      endif
+      if( trim(this%pair_function) == 'polycutoff' .or. trim(this%pair_function) == 'coscutoff' ) then
+         if( this%rmin >= this%cutoff ) then
+            RAISE_ERROR("eam_density_initialise: rmin must be smaller than cutoff for pair_function="//trim(this%pair_function)//" (got rmin="//this%rmin//", cutoff="//this%cutoff//")",error)
+         endif
+      endif
 
       this%initialised = .true.
 
@@ -5359,7 +5366,6 @@ endsubroutine water_trimer_calc !///////////////////////////////////////////////
       this%mode = 'blind'
       this%rmin = 0.0_dp
       this%order = 0
-      !this%transition_width = 0.0_dp
       this%Z = 0
       this%n_Zj = 0
 
@@ -5381,12 +5387,12 @@ endsubroutine water_trimer_calc !///////////////////////////////////////////////
       character(STRING_LENGTH) :: atom_mask_name
       logical :: has_atom_mask_name
       logical, dimension(:), pointer :: atom_mask_pointer
-      integer, dimension(total_elements) :: species_map
+      logical, dimension(total_elements) :: include_species
 
       logical :: my_do_descriptor, my_do_grad_descriptor
-      integer :: d, i, j, n, i_n, l_n_neighbours, i_desc, n_descriptors, n_cross, n_index, i_species
+      integer :: d, i, j, n, i_n, l_n_neighbours, i_desc, n_descriptors, n_cross, n_index
       integer, dimension(3) :: shift
-      real(dp) :: r_ij, rho_ij, prefactor
+      real(dp) :: r_ij, rho_ij
       real(dp), dimension(3) :: u_ij, drho_ij
 
       INIT_ERROR(error)
@@ -5397,19 +5403,20 @@ endsubroutine water_trimer_calc !///////////////////////////////////////////////
          RAISE_ERROR("eam_density_calc: descriptor object not initialised", error)
       endif
 
-      species_map = 0
-      do j = 1, size(this%Zj)
-         if(this%Zj(j) == 0) then
-            species_map = 1
-         else
-            species_map(this%Zj(j)) = j
-         endif
-      enddo
-
       my_do_descriptor = optional_default(.false., do_descriptor)
       my_do_grad_descriptor = optional_default(.false., do_grad_descriptor)
 
       if( .not. my_do_descriptor .and. .not. my_do_grad_descriptor ) return
+
+      ! Zj == 0 means all species are included; otherwise membership test
+      include_species = .false.
+      do j = 1, size(this%Zj)
+         if(this%Zj(j) == 0) then
+            include_species = .true.
+         else
+            include_species(this%Zj(j)) = .true.
+         endif
+      enddo
 
       atom_mask_pointer => null()
       if(present(args_str)) then
@@ -5503,21 +5510,17 @@ endsubroutine water_trimer_calc !///////////////////////////////////////////////
          do n = 1, n_neighbours(at,i)
             j = neighbour(at, i, n, distance = r_ij, cosines = u_ij, shift=shift)
 
-            i_species = species_map(at%Z(j))
-            if( i_species == 0 ) cycle
+            if( .not. include_species(at%Z(j)) ) cycle
             if( r_ij >= this%cutoff ) cycle
 
             i_n = i_n + 1
 
             if(my_do_descriptor) then
-               call eam_density_pair_function(this, r_ij, u_ij, at%Z(i), at%Z(j), this%pair_function, this%mode, this%cutoff, &
-                                              this%rmin, this%order, rho_ij, drho_ij, error)
+               call eam_density_pair_function(this, r_ij, u_ij, at%Z(i), at%Z(j), rho_ij, drho_ij, error)
                descriptor_out%x(i_desc)%data(1) = descriptor_out%x(i_desc)%data(1) + rho_ij
             endif
 
             if(my_do_grad_descriptor) then
-               !df_cut = dcoordination_function(r_ij,this%cutoff,this%transition_width) * u_ij
-
                descriptor_out%x(i_desc)%grad_data(1,:,0) = descriptor_out%x(i_desc)%grad_data(1,:,0) - drho_ij
 
                descriptor_out%x(i_desc)%ii(i_n) = j
@@ -5593,71 +5596,71 @@ endsubroutine water_trimer_calc !///////////////////////////////////////////////
 
    endsubroutine eam_density_sizes
 
-   subroutine eam_density_pair_function(this, r_ij, u_ij, Zi, Zj, pair_function, mode, rcut, rmin, order, rho_ij, drho_ij, error)
+   subroutine eam_density_pair_function(this, r_ij, u_ij, Zi, Zj, rho_ij, drho_ij, error)
       type(eam_density), intent(in) :: this
-      integer, intent(in) :: order, Zi, Zj
-      integer :: ii
-      real(dp), intent(in) :: r_ij, rcut, rmin
-      character(STRING_LENGTH) :: pair_function, mode
+      integer, intent(in) :: Zi, Zj
+      real(dp), intent(in) :: r_ij
+      real(dp), dimension(3), intent(in) :: u_ij
       real(dp), intent(out) :: rho_ij
       real(dp), dimension(3), intent(out) :: drho_ij
-      real(dp), dimension(3), intent(in) :: u_ij
+      integer, optional, intent(out) :: error
+
       real(dp) :: chi, prefactor
       real(dp), parameter :: PI = acos(-1.0_dp)
-      integer, optional, intent(out) :: error
       INIT_ERROR(error)
 
-      ! choose prefactor for different ways of treating density contributions
-      if (mode == 'blind') then
+      ! Prefactors chosen to reproduce standard EAM/Finnis-Sinclair density
+      ! conventions (used by tabGAP models); 'blind' keeps the raw pair density.
+      if (this%mode == 'blind') then
          prefactor = 1.0_dp
-      else if (mode == 'EAM') then
+      else if (this%mode == 'EAM') then
          prefactor = Zj**0.5_dp / 10.0_dp
-      else if (mode == 'FSsym') then
+      else if (this%mode == 'FSsym') then
          prefactor = (Zj * Zi)**0.5_dp / 40.0_dp
-      else if (mode == 'FSgen') then
+      else if (this%mode == 'FSgen') then
          prefactor = (Zi * Zj)**0.5_dp / 10.0_dp / Zi**0.4_dp
       else
-         RAISE_ERROR('eam_density: unknown mode for pair density, choose between: blind, EAM, FSsym, FSgen. Now: '//mode//'', error)
+         RAISE_ERROR('eam_density_pair_function: unknown mode for pair density, choose between: blind, EAM, FSsym, FSgen. Now: '//this%mode, error)
       end if
 
       ! choose and compute pair density function
-      if (pair_function == 'FSgen') then
+      if (this%pair_function == 'FSgen') then
          ! rho_ij = (-1)**order * (r_ij - rcut)**order / rcut**order
          ! drho_ij = (-1)**order * order * (r_ij - rcut)**(order - 1) / rcut**order * u_ij
-         if (r_ij > rcut) then
+         if (r_ij > this%cutoff) then
             rho_ij = 0.0_dp
             drho_ij = 0.0_dp
          else
-            rho_ij = (1.0_dp - r_ij / rcut)**order
-            drho_ij = -order * (1.0_dp - r_ij / rcut)**(order - 1) / rcut * u_ij
+            rho_ij = (1.0_dp - r_ij / this%cutoff)**this%order
+            drho_ij = -this%order * (1.0_dp - r_ij / this%cutoff)**(this%order - 1) / this%cutoff * u_ij
          end if
-      else if (pair_function == 'polycutoff') then
-         if (r_ij > rcut) then
+      else if (this%pair_function == 'polycutoff') then
+         if (r_ij > this%cutoff) then
             rho_ij = 0.0_dp
             drho_ij = 0.0_dp
-         else if (r_ij < rmin) then
+         else if (r_ij < this%rmin) then
             rho_ij = 1.0_dp
             drho_ij = 0.0_dp
          else
-            chi = (r_ij - rmin) / (rcut - rmin)
+            chi = (r_ij - this%rmin) / (this%cutoff - this%rmin)
             rho_ij = 1.0_dp - chi**3 * (6.0_dp * chi**2 - 15.0_dp * chi + 10.0_dp)
             drho_ij = -30.0_dp * chi**2 * (chi - 1.0_dp)**2
-            drho_ij = drho_ij / (rcut - rmin)
+            drho_ij = drho_ij / (this%cutoff - this%rmin)
             drho_ij = drho_ij * u_ij
          end if
-      else if (pair_function == 'coscutoff') then
-         if (r_ij > rcut) then
+      else if (this%pair_function == 'coscutoff') then
+         if (r_ij > this%cutoff) then
             rho_ij = 0.0_dp
             drho_ij = 0.0_dp
-         else if (r_ij < rmin) then
+         else if (r_ij < this%rmin) then
             rho_ij = 1.0_dp
             drho_ij = 0.0_dp
          else
-            rho_ij = 0.5_dp * (1.0_dp + cos(PI * (r_ij - rmin) / (rcut - rmin)))
-            drho_ij = u_ij * PI * sin(PI * (r_ij - rcut) / (rmin - rcut)) / (2.0_dp * (rmin - rcut))
+            rho_ij = 0.5_dp * (1.0_dp + cos(PI * (r_ij - this%rmin) / (this%cutoff - this%rmin)))
+            drho_ij = -u_ij * PI * sin(PI * (r_ij - this%rmin) / (this%cutoff - this%rmin)) / (2.0_dp * (this%cutoff - this%rmin))
          end if
       else
-         RAISE_ERROR('eam_density: unknown pair_function '//pair_function//'', error)
+         RAISE_ERROR('eam_density_pair_function: unknown pair_function '//this%pair_function, error)
       end if
 
       rho_ij = prefactor * rho_ij
